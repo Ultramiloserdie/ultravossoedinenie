@@ -3,9 +3,8 @@
 Один процесс QGIS Server на хосте в фоновом потоке опрашивает EVENTS_TABLE:
 новая запись -> линейный слой проекта с именем refl_name -> точка на route_m
 (или length_km) метров от начала трассы -> EVENTS_TABLE.geom.
-Метки рисует слой EVENTS_LAYER проекта (PostGIS EVENTS_TABLE): красный крест,
-повернутый на 45°, и подпись LABEL_EXPR. Если слоя нет, он добавляется в проект
-и проект сохраняется в БД.
+Метки рисует PostGIS-слой EVENTS_TABLE проекта: его добавляют в QGIS Desktop
+со стилем otdr_events.qml (красный крест 45°, подпись). Проект плагин только читает.
 """
 import ctypes
 import os
@@ -18,26 +17,18 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
-    QgsDataProvider,
     QgsDataSourceUri,
     QgsDistanceArea,
     QgsExpression,
     QgsFeatureRequest,
     QgsGeometry,
-    QgsMarkerSymbol,
     QgsMessageLog,
-    QgsPalLayerSettings,
     QgsPointXY,
     QgsProject,
     QgsProviderRegistry,
-    QgsSingleSymbolRenderer,
-    QgsTextBufferSettings,
-    QgsTextFormat,
     QgsVectorLayer,
-    QgsVectorLayerSimpleLabeling,
 )
-from qgis.PyQt.QtCore import QTimer, QVariant
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import QVariant
 from qgis.server import QgsServerFilter
 
 # Дано (OTDR_* - переменные окружения процесса QGIS Server)
@@ -46,8 +37,6 @@ PROJECT = os.environ.get("OTDR_PROJECT", "")        # имя проекта в P
 PROJECT_SCHEMA = "public"
 EVENTS_TABLE = "otdr.events"
 EVENTS_SRID = 3395              # SRID колонки geom (Яндекс)
-EVENTS_LAYER = "OTDR события"   # слой меток в проекте
-LABEL_EXPR = """'Обрыв!Время:' || format_date("received_at", 'yyyy/MM/dd/HH:mm:ss')"""
 POLL_SEC = 5                    # опрос таблицы
 WORK_TIMEOUT = "10 minutes"     # status = 'work' дольше: обработчик упал, событие берётся заново
 ORDER_FIELD = None              # поле порядка участков трассы
@@ -56,7 +45,6 @@ START_OFFSET_M = 0.0            # волокно до начала трассы,
 SNAP_TOL_M = 5.0                # допуск стыковки участков, м
 DEFAULT_ELLIPSOID = "EPSG:7030"
 
-_PROP = "otdr_marks/layer"      # пометка слоя меток, оформленного плагином
 _FAST = Qgis.ProjectReadFlags(Qgis.ProjectReadFlag.DontResolveLayers) | Qgis.ProjectReadFlag.DontLoadLayouts
 _CLAIM = """UPDATE {t} SET {st} = 'work', processed_at = now()
 WHERE id IN (SELECT id FROM {t}
@@ -262,68 +250,6 @@ def _events_layers(prj):
     return out
 
 
-def _events_source():
-    schema, table = EVENTS_TABLE.split(".")
-    u = QgsDataSourceUri(f"service='{PG_SERVICE}'")
-    u.setDataSource(schema, table, "geom", "", "id")
-    u.setSrid(str(EVENTS_SRID))
-    u.setWkbType(Qgis.WkbType.Point)
-    return u.uri(False)
-
-
-def _style(vl):
-    """Красный крест, повернутый на 45°, и подпись LABEL_EXPR."""
-    # у креста нет заливки: цвет задаёт обводка
-    vl.setRenderer(QgsSingleSymbolRenderer(QgsMarkerSymbol.createSimple({
-        "name": "cross", "angle": "45", "size": "6",
-        "color": "255,0,0,255", "outline_color": "255,0,0,255",
-        "outline_width": "1", "outline_width_unit": "MM"})))
-    buf = QgsTextBufferSettings()
-    buf.setEnabled(True)
-    buf.setColor(QColor(255, 255, 255))
-    fmt = QgsTextFormat()
-    fmt.setColor(QColor(220, 0, 0))
-    fmt.setSize(10)
-    fmt.setBuffer(buf)
-    lbl = QgsPalLayerSettings()
-    lbl.fieldName = LABEL_EXPR
-    lbl.isExpression = True
-    lbl.setFormat(fmt)
-    lbl.placementSettings().setOverlapHandling(Qgis.LabelOverlapHandling.AllowOverlapIfRequired)  # подпись у каждой метки
-    vl.setLabeling(QgsVectorLayerSimpleLabeling(lbl))
-    vl.setLabelsEnabled(True)
-    vl.setCustomProperty(_PROP, True)
-
-
-def ensure_events_layer(conn):
-    """Добавляет слой меток (или оформляет имеющийся слой EVENTS_TABLE) и сохраняет проект.
-
-    Только в главном потоке: проект читается полностью, с макетами."""
-    _, uri = _project_uri(conn)
-    prj = QgsProject()
-    if not prj.read(uri, _FAST):
-        raise RuntimeError(f"Не удалось прочитать проект {uri}: {prj.error()}")
-    if any(l.customProperty(_PROP) for l in _events_layers(prj)):
-        return False
-    prj = QgsProject()
-    if not prj.read(uri):
-        raise RuntimeError(f"Не удалось прочитать проект {uri}: {prj.error()}")
-    src = _events_source()
-    layers = _events_layers(prj)
-    for l in layers:
-        l.setDataSource(src, l.name(), "postgres", QgsDataProvider.ProviderOptions())
-        _style(l)
-    if not layers:
-        vl = QgsVectorLayer(src, EVENTS_LAYER, "postgres")
-        if not vl.isValid():
-            raise RuntimeError(f"Не открывается {EVENTS_TABLE}: {src}")
-        _style(vl)
-        prj.addMapLayer(vl)
-    if not prj.write():
-        raise RuntimeError(f"Не удалось сохранить проект {uri}: {prj.error()}")
-    return True
-
-
 # --- опрос EVENTS_TABLE ------------------------------------------------------------
 
 class _Poller(threading.Thread):
@@ -372,6 +298,9 @@ class _Poller(threading.Thread):
             prj = QgsProject()
             if not prj.read(self.uri, _FAST):
                 raise RuntimeError(f"Не удалось прочитать проект {self.uri}: {prj.error()}")
+            if not _events_layers(prj):
+                _log(f"В проекте {self.name!r} нет слоя {EVENTS_TABLE}: метки не видны. "
+                     "Добавьте слой в QGIS Desktop, стиль otdr_events.qml", Qgis.MessageLevel.Warning)
             self.prj, self.prj_ver = prj, ver
         return self.prj
 
@@ -408,24 +337,11 @@ class _ProcessEnviron(QgsServerFilter):
 
 
 class OtdrMarks:
-    """Серверный плагин: слой меток в проекте + фоновый опрос EVENTS_TABLE."""
+    """Серверный плагин: фоновый опрос EVENTS_TABLE."""
 
     def __init__(self, server_iface):
         self.server_iface = server_iface
         self.environ_filter = _ProcessEnviron(server_iface)
         server_iface.registerFilter(self.environ_filter, 10000)  # последним: другим фильтрам нужен environ запроса
-        lock = _single()
-        if lock is not None:
-            self.ensure_layer()
-        self.poller = _Poller(lock)
+        self.poller = _Poller(_single())
         self.poller.start()
-
-    def ensure_layer(self):
-        # главный поток; таймер повтора срабатывает при обработке очередного запроса
-        try:
-            if ensure_events_layer(_pg()):
-                _log(f"Слой {EVENTS_LAYER!r} сохранён в проекте")
-        except Exception as e:
-            _log(f"Слой {EVENTS_LAYER!r} не сохранён в проекте: {e}; повтор через 5 мин",
-                 Qgis.MessageLevel.Critical)
-            QTimer.singleShot(300_000, self.ensure_layer)

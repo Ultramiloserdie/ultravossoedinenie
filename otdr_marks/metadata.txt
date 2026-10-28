@@ -1,7 +1,7 @@
 [general]
 name=OTDR marks
 description=Метки обрывов OTDR из otdr.events на трассах проекта (QGIS Server)
-about=Опрашивает otdr.events, ставит метку на линейном слое refl_name на расстоянии route_m (length_km) от начала трассы; метки показывает слой otdr.events проекта.
-version=1.0.0
+about=Опрашивает otdr.events, ставит метку на линейном слое refl_name на расстоянии route_m (length_km) от начала трассы; метки показывает слой otdr.events проекта (добавляется в QGIS Desktop со стилем otdr_events.qml). Проект не изменяет.
+version=1.1.0
 qgisMinimumVersion=3.30
 server=True

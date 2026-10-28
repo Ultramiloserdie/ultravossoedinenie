@@ -8,10 +8,10 @@
 метров, поставить метку «красный крест 45°» с подписью `Обрыв!Время:гггг/ММ/дд/чч:мм:сс`,
 показать её в QWC2 и сохранить в проекте QGIS.
 
-## Плагин `otdr_marks`
+## Плагин `otdr_marks` (1.1.0)
 
 Репозиторий `https://github.com/Ultramiloserdie/ultravossoedinenie`,
-ветка `claude/qgis-snmp-trap-plugin-9t4s6k`, каталог `otdr_marks/`.
+ветка `claude/inspiring-mccarthy-wey7k8`, каталог `otdr_marks/`.
 
 Как работает:
 
@@ -27,31 +27,105 @@
   переводятся в отрезки.
 - Пишет в `otdr.events`: `status` (`ok`/`error`), `processed_at`, `route_m`, `note`,
   `geom` (EPSG:3395).
-- Метки показывает слой проекта «OTDR события» (PostGIS `otdr.events`): крест `cross`,
-  угол 45°, красная обводка; подпись
-  `'Обрыв!Время:' || format_date("received_at", 'yyyy/MM/dd/HH:mm:ss')`.
-  Если слоя нет, плагин добавляет его и сохраняет проект в `public.qgis_projects`
-  при старте.
+- Метки показывает PostGIS-слой `otdr.events` проекта. Его один раз добавляют в
+  QGIS Desktop со стилем `otdr_marks/otdr_events.qml`: крест `cross`, угол 45°,
+  красный; подпись `'Обрыв!Время:' || format_date("received_at", 'yyyy/MM/dd/HH:mm:ss')`.
+- Проект плагин только читает. Если слоя `otdr.events` в проекте нет, в журнале
+  QGIS Server предупреждение с тегом `OTDR`.
 - Колонка статуса: `status` или `stasus` — находится любая.
 
-Настройки — в начале `otdr_marks/otdr_marks.py`: `POLL_SEC`, `EVENTS_SRID`, `LABEL_EXPR`,
-`CABLE_FACTOR`, `START_OFFSET_M`, `SNAP_TOL_M`, `ORDER_FIELD`.
+Настройки — в начале `otdr_marks/otdr_marks.py`: `POLL_SEC`, `EVENTS_SRID`, `CABLE_FACTOR`,
+`START_OFFSET_M`, `SNAP_TOL_M`, `ORDER_FIELD`.
 
 Проверено: QGIS Server 3.34 (Ubuntu 24.04), PostgreSQL 16 / PostGIS 3.4, несколько
-процессов FastCGI. API сверено с QGIS 4.
+процессов FastCGI.
 
-## Установка
+### Изменения 1.1.0
+
+- Плагин больше не записывает проект. Версия 1.0.0 при старте добавляла слой
+  «OTDR события» (или меняла источник имеющегося слоя `otdr.events` на
+  `service='<OTDR_PG_SERVICE>'`) и перезаписывала проект в `public.qgis_projects`.
+  Если QGIS Server не находит этот сервис при обработке запросов, весь проект
+  отвечает `Layer(s) not valid` (HTTP 500) — см. «Проект не открывается».
+- Стиль слоя меток — файл `otdr_events.qml`, автообновление — свойство слоя в проекте.
+- `check_project.py`: проверка проекта в том виде, в каком его загружает QGIS Server.
+
+## Установка и обновление
 
 ```bash
-git clone -b claude/qgis-snmp-trap-plugin-9t4s6k https://github.com/Ultramiloserdie/ultravossoedinenie /tmp/uv
+rm -rf /tmp/uv && git clone -b claude/inspiring-mccarthy-wey7k8 https://github.com/Ultramiloserdie/ultravossoedinenie /tmp/uv
 sudo mkdir -p /opt/qgis-server/plugins
-sudo cp -r /tmp/uv/otdr_marks /opt/qgis-server/plugins/
+sudo rm -rf /opt/qgis-server/plugins/otdr_marks && sudo cp -r /tmp/uv/otdr_marks /opt/qgis-server/plugins/
+sudo systemctl restart 'qgis-server@*.service'
 ```
 
-Обновление:
+## Слой меток в проекте (QGIS Desktop, один раз)
+
+1. Открыть проект `q2s` из PostgreSQL.
+2. Если слоя «OTDR события» нет: Браузер → PostgreSQL → подключение → `otdr` → `events`
+   → добавить, переименовать в «OTDR события»; Свойства слоя → Стиль → «Загрузить стиль…» →
+   `otdr_events.qml`. Слой, добавленный версией 1.0.0, оставить.
+3. Свойства слоя → Отрисовка → «Периодическое обновление слоя»: 10 с, режим «Перезагрузить».
+4. Сохранить проект.
+5. Перезапустить QGIS Server: проект из БД процесс читает один раз и до перезапуска
+   изменений не видит (GetCapabilities тоже кэшируется).
+
+   ```bash
+   sudo systemctl restart 'qgis-server@*.service'
+   ```
+
+6. Перегенерировать конфигурацию QWC: qwc-admin-gui → Generate service configuration,
+   либо `curl -X POST "http://localhost:5010/generate_configs?tenant=default"`
+   (qwc-config-generator в qwc-docker). При `permissions_default_allow=false` выдать
+   права на слой «OTDR события».
+
+Подключение слоя должно быть доступно QGIS Server при обработке запросов: то же, что у
+остальных слоёв проекта, или сервис из `/etc/postgresql-common/pg_service.conf`.
+
+## Автообновление в QWC2
+
+- QWC2 перезапрашивает слой темы с интервалом «Периодическое обновление слоя» его
+  подслоёв: qwc-config-generator берёт `autoRefreshTime` из проекта и пишет
+  `refreshInterval` в `themes.json`.
+- Нужны qwc-map-viewer и qwc-config-generator не старше v2025.05.07 (в 2025-lts нет,
+  в 2026-lts есть). Проверка версий:
+
+  ```bash
+  docker ps --format '{{.Image}}' | grep -E 'qwc-map-viewer|qwc-config-generator'
+  ```
+
+  Скрипт `themesConfig.py`/`themesConfig.js` из qwc2 интервал не переносит.
+- Задержка появления метки: до `POLL_SEC` (5 с) + интервал слоя.
+- Нагрузка: каждый открытый клиент перерисовывает всю тему раз в интервал.
+
+## Проект не открывается (`Layer(s) not valid`)
+
+QGIS Server не отдаёт проект целиком, если не загружается хотя бы один слой
+(кроме слоёв из «Свойства проекта → QGIS Server → WMS → Исключить слои» и при
+`QGIS_SERVER_IGNORE_BAD_LAYERS=1`).
+При обработке запроса окружение процесса — параметры FastCGI: переменных из unit
+(`PGSERVICEFILE` и т.п.) нет, `pg_service.conf` ищется только в
+`/etc/postgresql-common/` и `~www-data/.pg_service.conf`.
+
+Проверка в таком же окружении:
 
 ```bash
-cd /tmp/uv && git pull && sudo cp -r otdr_marks /opt/qgis-server/plugins/ && sudo systemctl restart 'qgis-server@*.service'
+sudo -u www-data env -i QT_QPA_PLATFORM=offscreen /usr/bin/python3 /opt/qgis-server/plugins/otdr_marks/check_project.py 'postgresql:?service=gisdb&schema=public&project=q2s'
+```
+
+- `Слоёв: N, не загружаются: 0` — проект для QGIS Server исправен.
+- `definition of service "gisdb" not found` — сервис не виден при запросах: секция
+  `[gisdb]` должна быть в `/etc/postgresql-common/pg_service.conf` (права
+  `root:www-data`, `640`), затем перезапуск QGIS Server.
+- Другой слой в списке «Не загружается» — исправить его источник в QGIS Desktop
+  (ПКМ по слою → «Изменить источник данных…», у недоступного слоя — «Исправить источник
+  данных…»), сохранить проект, перезапустить QGIS Server.
+
+Временно открыть проект без незагружаемых слоёв:
+
+```bash
+echo 'QGIS_SERVER_IGNORE_BAD_LAYERS=1' | sudo tee -a /etc/qgis-server/env
+sudo systemctl restart 'qgis-server@*.service'
 ```
 
 ## Переменные окружения
@@ -62,9 +136,7 @@ cd /tmp/uv && git pull && sudo cp -r otdr_marks /opt/qgis-server/plugins/ && sud
 | `OTDR_PG_SERVICE` | имя секции `[...]` из `pg_service.conf` (здесь `gisdb`) |
 | `OTDR_PROJECT` | имя проекта в `public.qgis_projects` (здесь `q2s`); можно не задавать, если проект один |
 
-`OTDR_PG_SERVICE` — тот же сервис, что после `service=` в параметре `MAP` QGIS Server.
-По нему плагин подключается к `otdr.events`, читает/сохраняет проект и задаёт источник
-слоя «OTDR события».
+`OTDR_PG_SERVICE` — сервис, по которому плагин подключается к `otdr.events` и читает проект.
 
 Переменные должны быть в окружении процесса QGIS Server (unit systemd), а не в
 `fastcgi_param` nginx: QGIS читает `QGIS_PLUGINPATH`, а плагин — `OTDR_*` один раз
@@ -187,32 +259,19 @@ sudo tr '\0' '\n' < /proc/$PID/environ | grep -E 'QGIS_PLUGINPATH|OTDR_'
 
 QGIS Server принимает запросы через `FCGI_Accept` (libfcgi), который на время запроса
 подменяет `environ` процесса параметрами запроса и освобождает их в начале следующего.
-Поэтому `PGSERVICEFILE` из unit libpq видит только до первого запроса. Фоновый поток
-плагина из-за этого терял переменные процесса и читал освобождённую память — исправлено
-коммитом `4e5228f`: после каждого ответа плагин возвращает окружение процесса.
-
-## После первого запуска (один раз)
-
-1. `sudo systemctl restart 'qgis-server@*.service'` — все процессы перечитают проект
-   с новым слоем.
-2. Перегенерировать конфигурацию QWC: qwc-admin-gui → Generate service configuration,
-   либо `curl -X POST "http://localhost:5010/generate_configs?tenant=default"`
-   (qwc-config-generator в qwc-docker).
-3. При `permissions_default_allow=false` выдать права на слой «OTDR события».
+Поэтому `PGSERVICEFILE` из unit libpq видит только до первого запроса, а слои проекта
+загружаются уже при запросе. Фоновый поток плагина из-за этого терял переменные
+процесса и читал освобождённую память — исправлено коммитом `4e5228f`: после каждого
+ответа плагин возвращает окружение процесса.
 
 ## Замечания
 
 - `route_m` при вставке пуст (SNMP-скрипт его не пишет) — расстояние из `length_km`,
   результат записывается в `route_m`; заранее заполненный `route_m` используется как есть.
 - В референс-скрипте символ `x` с одним `color` рисуется цветом обводки (по умолчанию
-  тёмно-серый), не красным; в плагине задан `outline_color`.
-- QWC2 карту сам не обновляет: метка появляется при следующей перерисовке (GetMap).
-- Проект перезаписывает QGIS Server один раз; его версия должна быть не ниже версии
-  QGIS Desktop, иначе пропадут неизвестные серверу свойства.
-- Слой «OTDR события» использует `service=gisdb`: на ПК с QGIS Desktop в `pg_service.conf`
-  нужен сервис с тем же именем.
-- Существующий слой `otdr.events` (например, от референс-скрипта) не дублируется, а
-  переоформляется.
+  тёмно-серый), не красным; в `otdr_events.qml` задан `outline_color`.
+- После каждого сохранения проекта в QGIS Desktop — перезапуск QGIS Server и
+  перегенерация конфигурации QWC.
 - Референс-скрипт в Desktop параллельно не запускать — событие обработает тот, кто
   заберёт его первым.
 - Журнал: тег `OTDR` в логе QGIS Server появляется, когда процесс-опросчик обрабатывает
