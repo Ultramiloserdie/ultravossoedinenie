@@ -7,6 +7,7 @@
 повернутый на 45°, и подпись LABEL_EXPR. Если слоя нет, он добавляется в проект
 и проект сохраняется в БД.
 """
+import ctypes
 import os
 import socket
 import threading
@@ -37,6 +38,7 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QTimer, QVariant
 from qgis.PyQt.QtGui import QColor
+from qgis.server import QgsServerFilter
 
 # Дано (OTDR_* - переменные окружения процесса QGIS Server)
 PG_SERVICE = os.environ.get("OTDR_PG_SERVICE", "")  # сервис pg_service.conf с БД sasplanet_marks
@@ -61,6 +63,14 @@ WHERE id IN (SELECT id FROM {t}
              WHERE {st} IS NULL OR ({st} = 'work' AND processed_at < now() - interval '{timeout}')
              ORDER BY id LIMIT 50 FOR UPDATE SKIP LOCKED)
 RETURNING id, refl_name, length_km, route_m"""
+
+# libfcgi (FCGI_Accept) подменяет environ параметрами запроса и освобождает их в начале
+# следующего FCGI_Accept: до нового запроса getenv() фонового потока (libpq, PROJ) читал бы
+# освобождённую память без переменных процесса (PGSERVICEFILE и т.п.).
+_LIBC = ctypes.CDLL(None)
+_LIBC.getenv.restype = ctypes.c_char_p
+_ENVIRON = ctypes.c_void_p.in_dll(_LIBC, "environ")
+_ENV_COPY = (ctypes.c_char_p * (len(os.environb) + 1))(*(k + b"=" + v for k, v in os.environb.items()))
 
 
 def _log(msg, level=Qgis.MessageLevel.Info):
@@ -136,7 +146,7 @@ def _route_layer(prj, refl_name):
     key = _norm(refl_name)
     if not key:
         raise ValueError("Пустое название рефлектограммы")
-    other = None
+    err = None
     for l in prj.mapLayers().values():
         if not isinstance(l, QgsVectorLayer) or key not in (
                 _norm(l.name()), _norm(QgsDataSourceUri(l.source()).table())):
@@ -147,11 +157,14 @@ def _route_layer(prj, refl_name):
         vl = QgsVectorLayer(l.source(), l.name(), l.providerType(), opts)
         if l.crs().isValid():
             vl.setCrs(l.crs())
-        if vl.isValid() and vl.geometryType() == Qgis.GeometryType.Line:
+        if not vl.isValid():
+            err = f"Слой {l.name()!r} недоступен"
+        elif vl.geometryType() != Qgis.GeometryType.Line:
+            err = f"Слой {l.name()!r} не линейный"
+        else:
             return vl
-        other = l.name()
-    if other:
-        raise ValueError(f"Слой {other!r} не линейный или недоступен")
+    if err:
+        raise ValueError(err)
     raise LookupError(f"Трасса для рефлектограммы {refl_name!r} не найдена")
 
 
@@ -385,11 +398,22 @@ class _Poller(threading.Thread):
             _log(f"#{eid} {name}: {e}", Qgis.MessageLevel.Critical)
 
 
+class _ProcessEnviron(QgsServerFilter):
+    """После ответа возвращает environ к копии окружения процесса (_ENV_COPY)."""
+
+    def onResponseComplete(self):
+        if _LIBC.getenv(b"FCGI_ROLE"):  # environ - параметры запроса FastCGI
+            _ENVIRON.value = ctypes.addressof(_ENV_COPY)
+        return True
+
+
 class OtdrMarks:
     """Серверный плагин: слой меток в проекте + фоновый опрос EVENTS_TABLE."""
 
     def __init__(self, server_iface):
         self.server_iface = server_iface
+        self.environ_filter = _ProcessEnviron(server_iface)
+        server_iface.registerFilter(self.environ_filter, 10000)  # последним: другим фильтрам нужен environ запроса
         lock = _single()
         if lock is not None:
             self.ensure_layer()
